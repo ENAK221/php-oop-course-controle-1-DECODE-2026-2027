@@ -21,6 +21,14 @@ class ContactController extends AbstractController
             return $this->getAllContacts();
         }
 
+        if ($request->getMethod() === 'DELETE') {
+            return $this->deleteContact($request);
+        }
+
+        if ($request->getMethod() === 'PATCH') {
+            return $this->updateContact($request);
+        }
+
         if (!$this->hasJsonContentType($request)) {
             return $this->jsonResponse(415, ['error' => 'Content-Type must be application/json']);
         }
@@ -156,6 +164,95 @@ class ContactController extends AbstractController
         }
 
         return $this->jsonResponse(200, $contact);
+    }
+
+    private function deleteContact(Request $request): Response
+    {
+        $path = parse_url($request->getUri(), PHP_URL_PATH);
+        $file = is_string($path) ? $this->getContactFilePath($path) : null;
+        if ($file === null || !is_file($file)) {
+            return $this->jsonResponse(404, ['error' => 'Contact not found']);
+        }
+
+        if (!unlink($file)) {
+            return $this->jsonResponse(500, ['error' => 'Could not delete the contact']);
+        }
+
+        $response = new Response();
+        $response->statusCode = 204;
+        $response->content = '';
+
+        return $response;
+    }
+
+    private function updateContact(Request $request): Response
+    {
+        if (!$this->hasJsonContentType($request)) {
+            return $this->jsonResponse(415, ['error' => 'Content-Type must be application/json']);
+        }
+
+        $path = parse_url($request->getUri(), PHP_URL_PATH);
+        $file = is_string($path) ? $this->getContactFilePath($path) : null;
+        if ($file === null || !is_file($file)) {
+            return $this->jsonResponse(404, ['error' => 'Contact not found']);
+        }
+
+        if (!is_readable($file)) {
+            return $this->jsonResponse(500, ['error' => 'Could not read the contact']);
+        }
+
+        $content = file_get_contents($file);
+        if ($content === false) {
+            return $this->jsonResponse(500, ['error' => 'Could not read the contact']);
+        }
+
+        try {
+            $contact = json_decode($content, false, 512, JSON_THROW_ON_ERROR);
+        } catch (\JsonException) {
+            return $this->jsonResponse(500, ['error' => 'The contact file contains invalid JSON']);
+        }
+
+        if (!$this->isValidSavedContact($contact)) {
+            return $this->jsonResponse(500, ['error' => 'The contact file contains invalid data']);
+        }
+
+        try {
+            $updates = json_decode($request->getBody(), false, 512, JSON_THROW_ON_ERROR);
+        } catch (\JsonException) {
+            return $this->jsonResponse(400, ['error' => 'Invalid JSON']);
+        }
+
+        if (!is_object($updates)) {
+            return $this->jsonResponse(400, ['error' => 'The request body must be a JSON object']);
+        }
+
+        $updates = get_object_vars($updates);
+        if ($updates === [] || array_diff(array_keys($updates), ['email', 'subject', 'message']) !== []) {
+            return $this->jsonResponse(400, ['error' => 'Only email, subject and message can be updated']);
+        }
+
+        foreach ($updates as $field => $value) {
+            if (!is_string($value) || trim($value) === '') {
+                return $this->jsonResponse(400, ['error' => 'Invalid contact data']);
+            }
+
+            if ($field === 'email' && filter_var($value, FILTER_VALIDATE_EMAIL) === false) {
+                return $this->jsonResponse(400, ['error' => 'Invalid contact data']);
+            }
+        }
+
+        $contactData = get_object_vars($contact);
+        foreach ($updates as $field => $value) {
+            $contactData[$field] = $value;
+        }
+        $contactData['dateOfLastUpdate'] = (string) time();
+
+        $saved = file_put_contents($file, json_encode($contactData, JSON_THROW_ON_ERROR), LOCK_EX);
+        if ($saved === false) {
+            return $this->jsonResponse(500, ['error' => 'Could not update the contact']);
+        }
+
+        return $this->jsonResponse(200, (object) $contactData);
     }
 
     private function getContactFilePath(string $path): ?string
